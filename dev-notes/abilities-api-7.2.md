@@ -1,5 +1,11 @@
 # Abilities API updates in WordPress 7.2
 
+> Review draft, checked against WordPress trunk `f939960c4c6a59f9889e640925a5079fbe18f42c` on November 14, 2026. The capabilities section describes the current implementation; [#66325](https://core.trac.wordpress.org/ticket/66325#comment:18) remains open and needs release-scope confirmation before publication.
+>
+> Consolidated from gziolo’s original notes: [JSON values](https://core.trac.wordpress.org/ticket/66267#comment:44), [required capabilities](https://core.trac.wordpress.org/ticket/66325#comment:8), and [input sanitization](https://core.trac.wordpress.org/ticket/66383#comment:26). JSON response coverage reflects the follow-up in [changeset 65072](https://core.trac.wordpress.org/changeset/65072).
+>
+> This review preface is not part of the proposed published post.
+
 WordPress 7.2 adds declarative capability requirements and a shared input-preparation method to the Abilities API. It also preserves empty objects in schema defaults and JSON results. These changes affect ability registration, custom integrations, and clients that consume ability schemas or results.
 
 ## Preserve empty objects in JSON
@@ -41,7 +47,7 @@ echo wp_json_encode( wp_prepare_json_value_for_client( $result, $schema ) );
 // {"settings":{},"items":[{}]}
 ```
 
-The Abilities REST API applies these helpers when preparing schemas and execution results. A direct PHP call to `$ability->execute()` still returns the callback's result without this JSON representation step. Custom transports that serialize the result should prepare it with the ability's output schema before encoding it.
+The Abilities REST API applies these helpers when preparing schemas and execution results, including root empty objects and objects inside top-level lists. The WordPress AI Client also prepares ability results using the output schema. A direct PHP call to `$ability->execute()` still returns the callback's result without this JSON representation step. Custom transports that serialize the result should prepare it with the ability's output schema before encoding it.
 
 This preparation does not perform full schema validation or fill in missing defaults. It changes the representation of existing values. An empty array stays `[]` when the matching schema permits an array; a schema that permits both objects and arrays does not force it to become `{}`.
 
@@ -122,7 +128,7 @@ The REST collection supports the same opt-in filter:
 GET /wp-json/wp-abilities/v1/abilities?has_required_capabilities=true
 ```
 
-This filter does not run permission callbacks. Abilities without declared capabilities remain in the results, and an ability that passes discovery can still deny execution for a particular input. In the example above, an author may discover the ability while lacking permission to read another author's draft through it.
+This filter does not run permission callbacks or the `wp_ability_permission_result` filter. Abilities without declared capabilities pass this filter (other discovery filters can still exclude them), and an ability that passes discovery can still deny execution for a particular input. In the example above, an author may discover the ability while lacking permission to read another author's draft through it.
 
 Declare only the capabilities needed for every invocation. Putting an input-specific requirement in the static list can hide an ability from users who are allowed to execute it with other inputs.
 
@@ -140,7 +146,19 @@ The permission and execute callbacks receive the prepared value. For the example
 
 Validation runs before sanitization. Invalid values are rejected before casting or property removal can hide the error. A failure during preparation returns a `WP_Error` and stops execution.
 
-The REST execution controller uses this same preparation for its permission check and for execution. Custom integrations that call `execute()` can pass the raw input and let the ability prepare it.
+The REST execution controller prepares the original request input independently for its permission check and for execution. Custom integrations that call `execute()` can pass the raw input and let the ability prepare it.
+
+### Number inputs become floats
+
+A `number` schema converts an integer such as `10` to the float `10.0` in direct PHP calls, matching REST behavior. Use an `integer` schema when a callback needs integers. Callbacks using `number` should accept floats and avoid checks such as `is_int( $input )` or `$input === 10`.
+
+Other schema conversions include the string `"false"` becoming the boolean `false`, and `"1,2"` becoming `array( 1, 2 )` for an array-of-integers schema.
+
+### Sanitization failures stop execution
+
+Input can pass validation and still fail sanitization. For example, `array( '1', '01' )` contains distinct strings, but both become the integer `1`. That fails an array-of-integers schema with `uniqueItems: true`.
+
+In 7.2, this failure returns `ability_invalid_input`, including when it occurs in a nested field, before permission or execute callbacks run. The REST endpoint returns HTTP 400. It no longer falls back to the original unsanitized input when one field fails; such a fallback could otherwise leave a permission callback with the string `"false"`, which is truthy in PHP.
 
 ### Direct permission checks need prepared input
 
