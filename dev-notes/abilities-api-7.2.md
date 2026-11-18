@@ -1,80 +1,26 @@
 # Abilities API updates in WordPress 7.2
 
-> Review draft, checked against WordPress trunk `f939960c4c6a59f9889e640925a5079fbe18f42c` on November 14, 2026. The capabilities section describes the current implementation; [#66325](https://core.trac.wordpress.org/ticket/66325#comment:18) remains open and needs release-scope confirmation before publication.
+> Review draft, checked against WordPress trunk `19379c816819a77e55a2f2f577ac9809340cc407` on November 18, 2026. The capabilities section describes the current implementation. [#66325](https://core.trac.wordpress.org/ticket/66325#comment:21) was reopened after its November 17 closure; the release-scope discussion remains open.
 >
 > Consolidated from gziolo’s original notes: [JSON values](https://core.trac.wordpress.org/ticket/66267#comment:44), [required capabilities](https://core.trac.wordpress.org/ticket/66325#comment:8), and [input sanitization](https://core.trac.wordpress.org/ticket/66383#comment:26). JSON response coverage reflects the follow-up in [changeset 65072](https://core.trac.wordpress.org/changeset/65072).
 >
 > This review preface is not part of the proposed published post.
 
-WordPress 7.2 adds declarative capability requirements and a shared input-preparation method to the Abilities API. It also preserves empty objects in schema defaults and JSON results. These changes affect ability registration, custom integrations, and clients that consume ability schemas or results.
-
-## Preserve empty objects in JSON
-
-An empty PHP array encodes as `[]`, even when the schema describes an object. That can leave a client expecting an object with an array instead.
-
-Schema defaults are now prepared according to their schemas by `wp_prepare_json_schema_for_client()`:
-
-```php
-$schema = array(
-	'type'    => 'object',
-	'default' => array(),
-);
-
-echo wp_json_encode( wp_prepare_json_schema_for_client( $schema ) );
-// {"type":"object","default":{}}
-```
-
-The new `wp_prepare_json_value_for_client()` function applies the same distinction to result values, including nested properties and array items:
-
-```php
-$schema = array(
-	'type'       => 'object',
-	'properties' => array(
-		'settings' => array( 'type' => 'object' ),
-		'items'    => array(
-			'type'  => 'array',
-			'items' => array( 'type' => 'object' ),
-		),
-	),
-);
-
-$result = array(
-	'settings' => array(),
-	'items'    => array( array() ),
-);
-
-echo wp_json_encode( wp_prepare_json_value_for_client( $result, $schema ) );
-// {"settings":{},"items":[{}]}
-```
-
-The Abilities REST API applies these helpers when preparing schemas and execution results, including root empty objects and objects inside top-level lists. The WordPress AI Client also prepares ability results using the output schema. A direct PHP call to `$ability->execute()` still returns the callback's result without this JSON representation step. Custom transports that serialize the result should prepare it with the ability's output schema before encoding it.
-
-This preparation does not perform full schema validation or fill in missing defaults. It changes the representation of existing values. An empty array stays `[]` when the matching schema permits an array; a schema that permits both objects and arrays does not force it to become `{}`.
-
-Related ticket: [#66267](https://core.trac.wordpress.org/ticket/66267).
+WordPress 7.2 updates the Abilities API to make permissions, input handling, and JSON output more predictable. Abilities can declare capabilities required for every call. Direct PHP calls and REST requests sanitize input according to the ability’s schema, and JSON results preserve the object or array shape that the schema declares. The examples below show what ability authors and integration developers need to change.
 
 ## Declare required capabilities
 
 The new `required_capabilities` registration argument accepts a list of non-empty capability strings. During permission checking, WordPress checks each capability with `current_user_can()`. All listed capabilities must pass before the permission callback runs.
 
-Use this list for requirements that apply to every invocation. Keep checks that depend on the input in `permission_callback`. For example, an editorial tool can require `edit_posts` for every call and then check whether the user may edit the particular post.
-
-This example registers its category and ability on their respective hooks:
-
+Use this list for requirements that apply to every invocation. For example, `core/settings-get` always requires `manage_options`. Its registration declares that capability and omits `permission_callback`. This excerpt shows its permission arguments:
 ```php
-add_action(
-	'wp_abilities_api_categories_init',
-	static function () {
-		wp_register_ability_category(
-			'my-plugin',
-			array(
-				'label'       => __( 'My plugin', 'my-plugin' ),
-				'description' => __( 'Editorial tools.', 'my-plugin' ),
-			)
-		);
-	}
+array(
+	'required_capabilities' => array( 'manage_options' ),
+	// No permission_callback: the capability covers every call.
 );
-
+```
+When permissions also depend on the input, keep that check in `permission_callback`. The following ability requires `edit_posts` for every call, then checks whether the user can edit the requested post. The example assumes that the `my-plugin` category is already registered:
+```php
 add_action(
 	'wp_abilities_api_init',
 	static function () {
@@ -105,8 +51,11 @@ add_action(
 	}
 );
 ```
+Choose the permission arguments according to the ability’s requirements:
 
-When a non-empty capability list fully describes an ability's permissions, the `permission_callback` can be omitted. With no required capabilities, a valid callback is still required. To allow everyone to execute an ability, explicitly provide `__return_true` as its callback and leave the capability list empty.
+- If a non-empty `required_capabilities` list covers every permission check, omit `permission_callback`. You do not need `__return_true`.
+- If a call needs additional checks, such as access to a particular post, provide a callback. The declared capabilities are checked first.
+- If `required_capabilities` is empty or omitted, a valid `permission_callback` is required. Use `__return_true` only when the ability is intentionally executable by everyone; otherwise, provide the appropriate permission check.
 
 The existing `wp_ability_permission_result` filter still receives the result and can override it, including a denial caused by a missing capability.
 
@@ -195,9 +144,89 @@ A direct permission check does not execute the ability. For execution, call `exe
 
 Calling `normalize_input()` alone is insufficient: it does not include schema validation and sanitization. Likewise, `validate_input()` returns a validation result, not a prepared value.
 
+A custom permission-check path that already normalizes and validates input can replace those steps with `prepare_input()`. Keep the error check before calling `check_permissions()`:
+```diff
+- $input = $ability->normalize_input( $raw_input );
++ $input = $ability->prepare_input( $raw_input );
+  if ( is_wp_error( $input ) ) {
+      return $input;
+  }
+
+- $valid = $ability->validate_input( $input );
+- if ( is_wp_error( $valid ) ) {
+-     return $valid;
+- }
+
+  $permission = $ability->check_permissions( $input );
+```
+This adds schema sanitization to the custom path. Continue to handle the permission result as shown above.
 The REST controller's `sanitize_input_for_ability()` method is deprecated in 7.2 and is no longer registered as the input sanitizer. Its compatibility implementation returns the input unchanged.
 
 Related ticket: [#66383](https://core.trac.wordpress.org/ticket/66383).
+
+## Preserve empty objects in JSON
+
+An empty PHP array encodes as `[]`, even when the schema describes an object. That can leave a client expecting an object with an array instead.
+
+The shared `wp_prepare_json_schema_for_client()` function prepares schemas for use outside WordPress’s server-side validation. It removes unsupported keywords and prepares nested schemas and their existing defaults, so it is useful wherever a plugin exposes a schema to a REST client or frontend. In 7.2, its default-value handling preserves empty objects according to the schema:
+
+```php
+$schema = array(
+	'type'    => 'object',
+	'default' => array(),
+);
+
+echo wp_json_encode( wp_prepare_json_schema_for_client( $schema ) );
+// {"type":"object","default":{}}
+```
+
+The new `wp_prepare_json_value_for_client()` function applies the same distinction to result values, including nested properties and array items:
+
+```php
+$schema = array(
+	'type'       => 'object',
+	'properties' => array(
+		'settings' => array( 'type' => 'object' ),
+		'items'    => array(
+			'type'  => 'array',
+			'items' => array( 'type' => 'object' ),
+		),
+	),
+);
+
+$result = array(
+	'settings' => array(),
+	'items'    => array( array() ),
+);
+
+echo wp_json_encode( wp_prepare_json_value_for_client( $result, $schema ) );
+// {"settings":{},"items":[{}]}
+```
+
+The Abilities REST API applies these helpers when preparing schemas and execution results, including root empty objects and objects inside top-level lists. The WordPress AI Client also prepares ability results using the output schema. A direct PHP call to `$ability->execute()` still returns the callback's result without this JSON representation step. Custom transports that serialize the result should prepare it with the ability's output schema before encoding it.
+
+This preparation does not perform full schema validation or fill in missing defaults. It changes the representation of existing values. An empty array stays `[]` when the matching schema permits an array; a schema that permits both objects and arrays does not force it to become `{}`.
+
+### What integration developers should change
+
+Ability authors should declare `type: object` or `type: array` explicitly in the output schema, including nested properties whose empty values matter. A client consuming an object schema should expect `{}` for an empty result. Update code that depended on receiving `[]` in that case. Results declared as arrays continue to use `[]`.
+For a custom transport, prepare a successful result immediately before JSON encoding. Here, `$ability` is an already resolved `WP_Ability`, and `$raw_input` is the caller’s input:
+```php
+$result = $ability->execute( $raw_input );
+
+if ( is_wp_error( $result ) ) {
+	return $result;
+}
+
+return wp_json_encode(
+	wp_prepare_json_value_for_client(
+		$result,
+		$ability->get_output_schema()
+	)
+);
+```
+The helper preserves the schema’s JSON shape; it does not grant permission or replace execution. Keep errors on the transport’s normal error path instead of preparing them as successful results.
+Related ticket: [#66267](https://core.trac.wordpress.org/ticket/66267).
 
 ## Updating an integration
 
