@@ -1,6 +1,6 @@
 # Abilities API updates in WordPress 7.2
 
-> Review draft, checked against WordPress trunk `19379c816819a77e55a2f2f577ac9809340cc407` on November 18, 2026. The capabilities section describes the current implementation. [#66325](https://core.trac.wordpress.org/ticket/66325#comment:21) was reopened after its November 17 closure; the release-scope discussion remains open.
+> Review draft, checked against WordPress trunk `19379c816819a77e55a2f2f577ac9809340cc407` on November 18, 2026. The capabilities section follows Jason Adams’s November 18 decision to keep `required_capabilities` in Core ([#66325, comment 26](https://core.trac.wordpress.org/ticket/66325#comment:26)).
 >
 > Consolidated from gziolo’s original notes: [JSON values](https://core.trac.wordpress.org/ticket/66267#comment:44), [required capabilities](https://core.trac.wordpress.org/ticket/66325#comment:8), and [input sanitization](https://core.trac.wordpress.org/ticket/66383#comment:26). JSON response coverage reflects the follow-up in [changeset 65072](https://core.trac.wordpress.org/changeset/65072).
 >
